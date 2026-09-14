@@ -1,10 +1,10 @@
 import type { ExtensionAPI, OAuthCredentials, OAuthLoginCallbacks, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import { CLIENT_NAME, CLIENT_OS, CREDENTIALS_PATH, readCredentials, setTokenOverride, writeCredentialsToml } from "./credentials.js";
-import { clientVersion } from "./credentials.js";
-import { FALLBACK_MODELS, listCliModels, toProviderModels } from "./catalog.js";
-import { streamDevin } from "./stream.js";
-import { buildAuthUrl, exchangeAuthCode, fetchAccountInfo, formatAccountInfo, generatePkce } from "./auth.js";
-import { log, logPath } from "./log.js";
+import { CLIENT_NAME, CLIENT_OS, CREDENTIALS_PATH, readCredentials, setTokenOverride, writeCredentialsToml } from "./src/credentials.js";
+import { clientVersion } from "./src/credentials.js";
+import { FALLBACK_MODELS, listCliModels, toProviderModels } from "./src/catalog.js";
+import { streamDevin } from "./src/stream.js";
+import { buildAuthUrl, exchangeAuthCode, fetchAccountInfo, formatAccountInfo, generatePkce } from "./src/auth.js";
+import { log, logPath } from "./src/log.js";
 
 const PROVIDER_ID = "devin";
 

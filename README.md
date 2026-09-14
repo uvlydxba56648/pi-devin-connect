@@ -55,12 +55,12 @@ Token precedence: `DEVIN_TOKEN` / `WINDSURF_API_KEY` env → Pi OAuth credential
 ## Files
 
 ```
-index.ts        provider + commands + OAuth registration
-stream.ts       GetChatMessage request builder + frame decoder (thinking/tool calls/usage)
-connect.ts      Connect-RPC transport (unary + server-streaming envelopes, proxy CONNECT)
-catalog.ts      GetCliModelConfigs → Pi model list (+ router AssignModel resolution)
-credentials.ts  credentials.toml read/write, token normalization, client identity
-auth.ts         PKCE flow, GetUserStatus → account/plan/quota parsing
-proto.ts        minimal protobuf wire encoder/decoder (no deps)
-log.ts          JSON-lines debug log
+index.ts            provider + commands + OAuth registration (pi.extensions entry)
+src/stream.ts       GetChatMessage request builder + frame decoder (thinking/tool calls/usage)
+src/connect.ts      Connect-RPC transport (unary + server-streaming envelopes, proxy CONNECT)
+src/catalog.ts      GetCliModelConfigs → Pi model list (+ router AssignModel resolution)
+src/credentials.ts  credentials.toml read/write, token normalization, client identity
+src/auth.ts         PKCE flow, GetUserStatus → account/plan/quota parsing
+src/proto.ts        minimal protobuf wire encoder/decoder (no deps)
+src/log.ts          JSON-lines debug log
 ```
