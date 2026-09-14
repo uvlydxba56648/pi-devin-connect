@@ -330,6 +330,28 @@ export function resolveModelUid(
   return model.id;
 }
 
+/**
+ * Pick a bigger-context upstream uid when a request is rejected as too long.
+ * swe-2* entries all cap at 262K; fusion pairs and most other families have
+ * 1M. Preference order: DEVIN_OVERFLOW_MODEL env > fusion pairing that keeps
+ * the current uid as sidekick > largest-context non-router entry by rank().
+ */
+export function pickOverflowUid(currentUid: string): string | null {
+  const env = process.env.DEVIN_OVERFLOW_MODEL?.trim();
+  if (env && env !== currentUid) return env;
+  const catalog = peekCatalog() ?? [];
+  const fusion = catalog.filter((m) => m.isRouter && !m.disabled && m.id.endsWith(`-sidekick-${currentUid}`));
+  for (const lead of ["gpt-6-astra-high", "claude-fable-5-1-high", "claude-opus-5-high", "gpt-5-6-sol-high"]) {
+    const hit = fusion.find((m) => m.id.includes(`-${lead}-`));
+    if (hit) return hit.id;
+  }
+  if (fusion[0]) return fusion[0].id;
+  const big = catalog
+    .filter((m) => !m.isRouter && !m.disabled && m.id !== currentUid && (m.contextWindow ?? 0) >= 1_000_000)
+    .sort((a, b) => rank(a.id) - rank(b.id));
+  return big[0]?.id ?? null;
+}
+
 export const FALLBACK_MODELS: ProviderModelConfig[] = [
   {
     id: "swe-2",

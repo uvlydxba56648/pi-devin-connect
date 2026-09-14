@@ -9,7 +9,7 @@ import {
   createAssistantMessageEventStream,
   parseStreamingJson,
 } from "@earendil-works/pi-ai";
-import { assignRouter, peekCatalog, resolveModelUid } from "./catalog.js";
+import { assignRouter, peekCatalog, pickOverflowUid, resolveModelUid } from "./catalog.js";
 import { setTokenOverride } from "./credentials.js";
 import {
   GET_CHAT,
@@ -356,11 +356,12 @@ export async function buildChatRequest(
   model: Model<string>,
   context: Context,
   options?: SimpleStreamOptions,
+  forceUid?: string,
 ): Promise<{ body: Buffer; cascadeId: string; modelUid: string; assignmentJwt?: string }> {
   const buildT0 = Date.now();
   const { token } = requireToken();
   const { trajectory, cascade } = sessionIds(context, options?.sessionId);
-  let uid = resolveModelUid(model, options?.reasoning);
+  let uid = forceUid ?? resolveModelUid(model, options?.reasoning);
   let assignmentJwt: string | undefined;
   const entry = peekCatalog()?.find((m) => m.id === uid);
   if (entry?.isRouter) {
@@ -629,8 +630,13 @@ export function streamDevin(
       }
     };
 
-    try {
-      const built = await buildChatRequest(model, context, options);
+    // One full request attempt. On "prompt too long" the caller retries once
+    // with a bigger-context uid (mirrors the CLI's fallback-to-uncompacted /
+    // retry-with-fewer-images behavior).
+    let lastAttemptUid: string | undefined;
+    const attempt = async (overflowUid?: string): Promise<void> => {
+      const built = await buildChatRequest(model, context, options, overflowUid);
+      lastAttemptUid = built.modelUid;
       output.providerThinkingLevel = built.modelUid;
       enqueue({ type: "start", partial: output });
       const reqT0 = Date.now();
@@ -818,6 +824,25 @@ export function streamDevin(
       // Let the queue drain at tick cadence so the tail also looks smooth;
       // emitHead ends the stream when the done event surfaces.
       enqueue({ type: "done", reason: output.stopReason === "error" || output.stopReason === "aborted" || output.stopReason === "pending" || output.stopReason === "deferred" ? "stop" : output.stopReason, message: output });
+    };
+
+    try {
+      try {
+        await attempt();
+      } catch (firstError) {
+        const msg = firstError instanceof Error ? firstError.message : String(firstError);
+        const tooLong = /prompt is too long|too long for this model|context window|token limit/i.test(msg);
+        const overflowUid = tooLong ? pickOverflowUid(lastAttemptUid ?? model.id) : null;
+        if (!overflowUid) throw firstError;
+        // Reset partial stream state before the retry (failure lands at the
+        // first frame so nothing should be emitted yet, but be thorough).
+        output.content.length = 0;
+        tools.length = 0;
+        textOpen = false;
+        thinkingOpen = false;
+        log("stream", "overflow-retry", { model: model.id, from: lastAttemptUid, uid: overflowUid });
+        await attempt(overflowUid);
+      }
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = error instanceof Error ? error.message : String(error);
