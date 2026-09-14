@@ -1,0 +1,30 @@
+{
+  "name": "pi-devin-connect",
+  "version": "0.1.0",
+  "description": "Devin (Cognition) models inside Pi — direct Connect-RPC provider that shares the Devin CLI credential, with in-Pi PKCE login and /devin-status.",
+  "type": "module",
+  "main": "./index.ts",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "devin",
+    "cognition",
+    "swe-2",
+    "connect-rpc",
+    "ai-agent",
+    "coding-assistant"
+  ],
+  "files": [
+    "*.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

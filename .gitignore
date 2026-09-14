@@ -1,0 +1,5 @@
+node_modules/
+*.log
+credentials.toml
+.DS_Store
+dist/
