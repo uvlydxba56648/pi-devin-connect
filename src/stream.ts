@@ -33,8 +33,6 @@ const REQUEST_CASCADE = 5;
 const PLANNER_DEFAULT = 1;
 const TRAJECTORY_CASCADE = 4;
 const STEP_USER_INPUT = 14;
-const CACHE_EPHEMERAL = 1;
-const PROVIDER_SOURCE_CASCADE = 12;
 const XML_PARAM = /<(?:antml:)?parameter\s+name="([A-Za-z_][\w-]*)"[^>]*>([\s\S]*?)<\/(?:antml:)?parameter>/g;
 
 interface ChatPrompt {
@@ -49,7 +47,6 @@ interface ChatPrompt {
   thinkingRedacted?: boolean;
   outputId?: string;
   images?: Array<{ data: string; mime?: string }>;
-  cache?: boolean;
 }
 
 interface OpenTool {
@@ -103,8 +100,12 @@ function sessionIds(context: Context, sessionId?: string): { trajectory: string;
 function nextStepIndex(trajectory: string): number {
   const next = stepCountByTrajectory.get(trajectory) ?? 0;
   if (stepCountByTrajectory.size >= 65536) stepCountByTrajectory.clear();
-  stepCountByTrajectory.set(trajectory, next + 1);
-  return next; // first call → 0 → field omitted (matches wire)
+  // Captured order per trajectory: user turn 1 → step_index omitted (0),
+  // title-gen call → 1, user turn 2 → 2, user turn 3 → 3… The counter covers
+  // every GetChatMessage on the trajectory, including the one-shot title call.
+  // We emulate that: after our first request the counter jumps to 2.
+  stepCountByTrajectory.set(trajectory, next === 0 ? 2 : next + 1);
+  return next;
 }
 
 function encodeImage(data: string, mime = "image/png"): Buffer {
@@ -154,7 +155,6 @@ function encodePrompt(prompt: ChatPrompt): Buffer {
   if (prompt.text) parts.push(encodeString(3, prompt.text));
   for (const call of prompt.toolCalls ?? []) parts.push(encodeMessage(6, encodeToolCall(call)));
   if (prompt.toolCallId) parts.push(encodeString(7, prompt.toolCallId));
-  if (prompt.cache) parts.push(encodeMessage(8, encodeVarintField(1, CACHE_EPHEMERAL)));
   if (prompt.toolError) parts.push(encodeBool(9, true));
   for (const img of prompt.images ?? []) parts.push(encodeMessage(10, encodeImage(img.data, img.mime)));
   if (prompt.thinking) parts.push(encodeString(11, prompt.thinking));
@@ -305,7 +305,6 @@ function demoteOrphanToolResults(prompts: ChatPrompt[]): ChatPrompt[] {
       source: SOURCE_USER,
       text: `[tool result, original call lost]\n${prompt.text ?? ""}`,
       images: prompt.images,
-      cache: prompt.cache,
     };
   });
 }
@@ -329,16 +328,17 @@ function withToolDescriptions(system: string, context: Context): string {
 }
 
 function encodeCompletion(options?: SimpleStreamOptions): Buffer {
-  // Restore the values that worked for long CASCADE turns (swe-2-max).
-  // The ACP capture of a 1-prompt swe-1-6-fast turn used temp=0/top_p=0 and
-  // was rejected as invalid_argument when applied to 262-message tool chats.
+  // Captured on a real swe-2-high turn (3000.10.21, `devin -p --model swe-2`):
+  // num_completions=1, max_tokens=128000, max_newlines=400, temperature=1.0,
+  // top_k=40, top_p=0.95 stored as f32→f64 (=0.949999988079071). temp=0/top_p=0
+  // is rejected by swe-2 models with invalid_argument — do not send zeroes.
   const parts: Buffer[] = [
     encodeVarintField(1, 1),
     encodeVarintField(2, options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : 128000),
     encodeVarintField(3, 400),
     encodeDouble(5, options?.temperature ?? 1),
     encodeVarintField(7, 40),
-    encodeDouble(8, 0.95),
+    encodeDouble(8, Math.fround(0.95)),
   ];
   return Buffer.concat(parts);
 }
@@ -375,7 +375,6 @@ export async function buildChatRequest(
     }
   }
   const prompts = convertMessages(context);
-  if (prompts.length > 0) prompts[prompts.length - 1].cache = true;
   log("build", "chat-request", {
     model: model.id,
     uid,
@@ -398,15 +397,12 @@ export async function buildChatRequest(
   if (options?.toolChoice === "none") {
     parts.push(encodeMessage(12, encodeString(1, "none")));
   }
-  parts.push(encodeMessage(13, encodeVarintField(1, CACHE_EPHEMERAL)));
   parts.push(encodeMessage(15, encodeTrajectory(trajectory, nextStepIndex(trajectory))));
   parts.push(encodeString(16, cascade));
-  // CASCADE turns with tools require provider_source=12; omitting it (as the
-  // tiny ACP capture did) produces invalid_argument on long Pi conversations.
-  parts.push(encodeVarintField(18, PROVIDER_SOURCE_CASCADE));
+  // Verified absent on real swe-2-high and swe-1-6-fast wire captures:
+  // 13 cache options, 18 provider_source, 22 execution_id are never sent.
   parts.push(encodeVarintField(20, PLANNER_DEFAULT));
   parts.push(encodeString(21, uid));
-  parts.push(encodeString(22, randomUUID()));
   if (assignmentJwt) parts.push(encodeString(26, assignmentJwt));
   return { body: Buffer.concat(parts), cascadeId: cascade, modelUid: uid, assignmentJwt };
 }
