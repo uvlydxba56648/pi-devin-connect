@@ -420,6 +420,62 @@ function mapStop(reason: number): AssistantMessage["stopReason"] {
   return "stop";
 }
 
+
+// --- prefix-cache keepalive ------------------------------------------------
+// CLI 抓包实测（3000.10.27）：存在待执行 action（工具执行/等权限）时，
+// CLI 每 ~4m55s 把整段 GetChatMessage 原样重发 + 末尾追加合成 "continue"
+// 用户消息，刷新服务端前缀缓存 TTL（≈5min）；这就是工具窗口后下一轮
+// 依旧低 TTFT 的原因。插件在 stopReason=toolUse（有工具调用待执行）后
+// 按同节奏 ping；stop/end_turn 不 ping（CLI 原话：No action request on
+// PostActionGeneration; skipping）。router 会话（assignment_jwt 绑
+// cascade）跳过；下一次真实请求到达即取消，ping 失败一次即停。
+const KEEPALIVE_INTERVAL_MS = 285_000; // ~4m45s，稳在 5min TTL 内侧
+const KEEPALIVE_MAX_PINGS = 24; // ~2h 上限，防无限烧 quota
+
+interface KeepaliveState {
+  seq: number;
+  abort: AbortController;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+const keepaliveByCascade = new Map<string, KeepaliveState>();
+
+function cancelKeepalive(cascade: string): void {
+  const st = keepaliveByCascade.get(cascade);
+  if (!st) return;
+  if (st.timer) clearTimeout(st.timer);
+  st.abort.abort();
+  keepaliveByCascade.delete(cascade);
+}
+
+function armKeepalive(cascade: string, fire: () => Promise<void>): void {
+  if (process.env.DEVIN_NO_CACHE_KEEPALIVE) return;
+  cancelKeepalive(cascade);
+  const st: KeepaliveState = { seq: 0, abort: new AbortController(), timer: null };
+  const schedule = () => {
+    st.timer = setTimeout(() => {
+      if (st.abort.signal.aborted) return;
+      st.seq++;
+      fire()
+        .then(() => {
+          log("keepalive", "ping", { cascade: cascade.slice(0, 8), seq: st.seq });
+          if (st.abort.signal.aborted) return;
+          if (st.seq < KEEPALIVE_MAX_PINGS) {
+            schedule();
+          } else {
+            keepaliveByCascade.delete(cascade);
+          }
+        })
+        .catch((err) => {
+          log("keepalive", "ping-failed", { cascade: cascade.slice(0, 8), seq: st.seq, err: String(err).slice(0, 200) });
+          cancelKeepalive(cascade);
+        });
+    }, KEEPALIVE_INTERVAL_MS);
+    // unref：keepalive 只是热度优化，不该把进程拖住。
+    st.timer.unref();
+  };
+  keepaliveByCascade.set(cascade, st);
+  schedule();
+}
 function repairXmlArguments(raw: string): Record<string, string> | null {
   const out: Record<string, string> = {};
   let match: RegExpExecArray | null;
@@ -641,6 +697,8 @@ export function streamDevin(
     let lastAttemptUid: string | undefined;
     const attempt = async (overflowUid?: string): Promise<void> => {
       const built = await buildChatRequest(model, context, options, overflowUid);
+      // 真实请求到达 → 取消该会话可能挂着的 keepalive 定时器
+      cancelKeepalive(built.cascadeId);
       lastAttemptUid = built.modelUid;
       output.providerThinkingLevel = built.modelUid;
       enqueue({ type: "start", partial: output });
@@ -842,6 +900,24 @@ export function streamDevin(
       // Let the queue drain at tick cadence so the tail also looks smooth;
       // emitHead ends the stream when the done event surfaces.
       enqueue({ type: "done", reason: output.stopReason === "error" || output.stopReason === "aborted" || output.stopReason === "pending" || output.stopReason === "deferred" ? "stop" : output.stopReason, message: output });
+      // CLI 实测：仅当有 action 待执行（toolUse = 工具调用还没跑）时才 arm
+      // keepalive；stop/end_turn 用户思考期间不 ping。router 会话的
+      // assignment_jwt 绑定 cascade，重放请求不带 jwt 可能被拒 → 跳过。
+      if (output.stopReason === "toolUse" && !built.assignmentJwt && !options?.signal?.aborted) {
+        armKeepalive(built.cascadeId, async () => {
+          const ka = keepaliveByCascade.get(built.cascadeId);
+          if (!ka || ka.abort.signal.aborted) return;
+          const pingContext = {
+            ...context,
+            messages: [...(context.messages ?? []), { role: "user", content: [{ type: "text", text: "continue" }] }],
+          } as Context;
+          const ping = await buildChatRequest(model, pingContext, options, built.modelUid);
+          const remote = await connectStream(GET_CHAT, ping.body, ka.abort.signal);
+          for await (const _frame of readConnectFramesWithStall(remote)) {
+            // drain：只为刷新服务端前缀缓存，响应内容丢弃
+          }
+        });
+      }
     };
 
     try {
