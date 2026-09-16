@@ -11,6 +11,7 @@ This extension talks to Devin's Connect-RPC endpoint (`server.codeium.com`) nati
 - **`/login devin`** — in-Pi PKCE login: prints the Devin sign-in URL, you paste back the code, the extension exchanges it and stores the credential in `~/.local/share/devin/credentials.toml` — **shared with the real `devin` CLI** (either side can log in/out for both).
 - **`/devin-status`** — account name, plan, daily/weekly quota %, credit balances, reset times.
 - Honors `HTTPS_PROXY` / `HTTP_PROXY` (CONNECT tunnel) for the upstream connection.
+- **Prefix-cache keepalive** — while tool calls are pending (`stopReason=toolUse`), replays the conversation + a synthetic `continue` message every ~4m45s to keep the ~5min server-side prefix cache hot, mirroring the real CLI. Stops on the next request, first failure, or after ~2h. `DEVIN_NO_CACHE_KEEPALIVE=1` disables it.
 
 ## Install
 
