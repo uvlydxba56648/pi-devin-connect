@@ -440,6 +440,32 @@ export async function* readConnectFrames(
   }
 }
 
+// Frame-level stall watchdog: the bare generator blocks in reader.read()
+// forever when the upstream stream wedges mid-response (LB idle kill, backend
+// hang). Race each step against a timeout so callers see an error instead of
+// an infinite hang. 120s matches the CLI's observed long-thinking gaps.
+export async function* readConnectFramesWithStall(
+  stream: ReadableStream<Uint8Array>,
+  stallMs = 120_000,
+): AsyncGenerator<{ end: boolean; payload: Buffer }> {
+  const it = readConnectFrames(stream)[Symbol.asyncIterator]();
+  while (true) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const step = await Promise.race([
+      it.next(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`devin stream stalled: no frames for ${Math.round(stallMs / 1000)}s`)),
+          stallMs,
+        );
+      }),
+    ]);
+    clearTimeout(timer);
+    if (step.done) return;
+    yield step.value;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Keep-alive warm-up. The CLI keeps a hot connection via ambient RPCs; idle
 // LBs drop ours. A cheap unary ping on a timer after first use keeps the

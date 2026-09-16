@@ -21,6 +21,7 @@ import {
   encodeString,
   encodeVarintField,
   readConnectFrames,
+  readConnectFramesWithStall,
   requireToken,
 } from "./connect.js";
 import { encodeDouble, fieldBuf, fieldInt, fieldString, iterFields } from "./proto.js";
@@ -408,6 +409,10 @@ export async function buildChatRequest(
   return { body: Buffer.concat(parts), cascadeId: cascade, modelUid: uid, assignmentJwt };
 }
 
+// Frame field numbers consumed by the delta loop; other length-delimited
+// fields become error-text candidates when a frame signals stopReason "error".
+const HANDLED_FRAME_FIELDS = new Set([1, 3, 4, 5, 6, 7, 9, 10, 11, 15, 21, 23, 25]);
+
 function mapStop(reason: number): AssistantMessage["stopReason"] {
   if (reason === 10) return "toolUse";
   if (reason === 3 || reason === 5 || reason === 1 || reason === 9) return "length";
@@ -659,7 +664,7 @@ export function streamDevin(
       let firstFrameMs: number | null = null;
       let firstTextMs: number | null = null;
       let firstThinkMs: number | null = null;
-      for await (const frame of readConnectFrames(remote)) {
+      for await (const frame of readConnectFramesWithStall(remote)) {
         if (firstFrameMs === null) {
           firstFrameMs = Date.now() - reqT0;
           log("stream", "first-frame", { model: model.id, ms: firstFrameMs });
@@ -685,6 +690,10 @@ export function streamDevin(
         let deltaTokens = 0;
         let phase = "";
         const toolDeltas: Array<{ id: string; name: string; args: string; hasArgs: boolean; custom: boolean }> = [];
+        // Collect printable text from fields we don't specifically handle. When the
+        // stream ends with stopReason "error" the message may ride an unmodeled
+        // field — capture it so the caller's tooLong check can fire overflow retry.
+        let frameErrorText = "";
         for (const f of iterFields(frame.payload)) {
           if (f.num === 1 && !output.responseId) output.responseId = fieldString(f);
           if (f.num === 3) deltaText = fieldString(f);
@@ -731,6 +740,12 @@ export function streamDevin(
           if (f.num === 21) deltaSignatureType = fieldString(f);
           if (f.num === 23) output.responseModel = fieldString(f);
           if (f.num === 25) phase = fieldString(f);
+          if (f.wire === 2 && !HANDLED_FRAME_FIELDS.has(f.num)) {
+            const s = fieldString(f);
+            if (s.length > frameErrorText.length && /[a-zA-Z]/.test(s) && /^[\x20-\x7e\s]*$/.test(s)) {
+              frameErrorText = s;
+            }
+          }
         }
         if (phase && phase !== lastPhase) {
           lastPhase = phase;
@@ -795,6 +810,9 @@ export function streamDevin(
         if (stopReason) {
           sawStop = true;
           output.stopReason = mapStop(stopReason);
+          if (output.stopReason === "error" && !output.errorMessage && frameErrorText) {
+            output.errorMessage = frameErrorText;
+          }
         }
       }
       closeThinking();
